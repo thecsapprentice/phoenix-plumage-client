@@ -7,6 +7,9 @@ from threading  import Thread, Lock
 from datetime import timedelta, datetime 
 import time
 
+import glob
+import shutil
+
 try:
     from Queue import Queue, Empty
 except ImportError:
@@ -126,6 +129,12 @@ class BlenderNode:
             self._logthread.join()
             self._logthread = None
             self._process = None
+            try:
+                cache_files = glob.glob("/cache/*")
+                for cache_file in cache_files:
+                    os.remove( cache_file );
+            except:
+                print "\n\nfailed to clean up cache directory after stopping render.\n\n"
 
     def CheckStatus(self, ):
         if self._process != None:
@@ -138,14 +147,19 @@ class BlenderNode:
                 if self._lastrt == 0:
                     with open( "/tmp/Renders/render_{:08d}.png".format(self._frame), 'rb' ) as f:
                         self._lastrender = f.read()
+                    try:
+                        os.remove( "/tmp/Renders/render_{:08d}.png".format(self._frame) );
+                    except: 
+                        print "\n\nfailed to remove temporary render result.\n\n"
                     self._currentattempt = 0
+                    self.StopRender()
                 else:
                     print "Render job failed with code", str(self._lastrt), ",",
                     if self._currentattempt < self._attempts:
-                        print "restarting job for attempt", str(self._currentattempt + 1)
-                        self.BeginRender();
+                        print "\n\nrestarting job for attempt", str(self._currentattempt + 1), "\n\n"
+                        self.RestartRender();
                     else:
-                        print "terminating job due to excessive failures."
+                        print "\n\nterminating job due to excessive failures.\n\n"
                         self._currentattempt = 0
                         self.StopRender()
                     
@@ -157,11 +171,10 @@ class BlenderNode:
                     if time_running > self._timeout: # We have exceeded timeout
                         print "Render job timeout exceeded,",
                         if self._currentattempt < self._attempts:
-                            print "restarting job for attempt", str(self._currentattempt + 1)
-                            self.StopRender()
-                            self.BeginRender()
+                            print "\n\nrestarting job for attempt", str(self._currentattempt + 1), "\n\n"
+                            self.RestartRender();
                         else:
-                            print "terminating job due to excessive failures."
+                            print "\n\nterminating job due to excessive failures.\n\n"
                             self.StopRender()
                             self._currentattempt = 0
                             self._lastrt = 1

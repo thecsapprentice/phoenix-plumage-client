@@ -21,6 +21,7 @@ from node import RenderNode
 from node import BlenderNode
 import os 
 import traceback
+import socket
 
 class DateTimeEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -111,7 +112,9 @@ class RenderWorker(object):
                                                                "type":"BLENDER",
                                                                } , cls=DateTimeEncoder),
                                            properties=pika.BasicProperties(
-                        delivery_mode = 2  )                                           
+                                               delivery_mode = 2,
+                                               app_id = socket.gethostname(),
+                                           )                                           
                                            )
                 
                 # Save off the render to disk somewhere
@@ -137,7 +140,9 @@ class RenderWorker(object):
                                                                "type":"BLENDER",
                                                                } , cls=DateTimeEncoder),
                                            properties=pika.BasicProperties(
-                        delivery_mode = 2  )
+                                               delivery_mode = 2,
+                                               app_id = socket.gethostname(),
+                                           )
                                            ) 
                 self.render_started = False
                 self.channel.basic_ack(delivery_tag = self._renderManager.tag)
@@ -191,7 +196,9 @@ class RenderWorker(object):
                                                                        "type":"BLENDER",
                                                                        } , cls=DateTimeEncoder),
                                                    properties=pika.BasicProperties(
-                                delivery_mode = 2  )
+                                                       delivery_mode = 2,
+                                                       app_id = socket.gethostname(),
+                                                   )
                                                    )                                           
             else:
                 ch.basic_reject(delivery_tag = method.delivery_tag, requeue=True);
