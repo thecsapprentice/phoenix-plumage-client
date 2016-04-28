@@ -81,6 +81,16 @@ class RenderWorker(object):
         self.channel.basic_consume(self.callback,
                                    queue='render_queue')
         
+#    def QueryJobPriority(self,):
+#        
+#        try:
+#            r = requests.get(self._murl+"/job_priority")
+#        except: Exception, e:
+#            print "Failed to get a job priority list from the server. Trying later."
+#        if r.status_code != requests.codes.ok:
+#            print "Failed to get a job priority list from the server. Trying later."
+            
+
 
     def spin_up_new_pid(self,config):
         pass

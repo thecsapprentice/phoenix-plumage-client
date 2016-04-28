@@ -96,6 +96,12 @@ class BlenderNode:
                                    "for scene in bpy.data.scenes:\n",
                                    "    scene.cycles.seed = seed\n" ])
 
+        # Remove the image file that we will be producing to eliminate false positives
+        try:
+            os.remove( "/tmp/Renders/render_{:08d}.png".format(self._frame) );
+        except: 
+            pass
+
         self._process = Popen( [self._exec_binary,
                                 "-b",
                                 osp.join( self._scene_path, self._scene, 'scene.blend' ),
@@ -136,6 +142,34 @@ class BlenderNode:
             except:
                 print "\n\nfailed to clean up cache directory after stopping render.\n\n"
 
+    def job_failed(self, ):
+        if self._currentattempt < self._attempts:
+            print "\n\nrestarting job for attempt", str(self._currentattempt + 1), "\n\n"
+            self.RestartRender();
+        else:
+            print "\n\nterminating job due to excessive failures.\n\n"
+            self.StopRender()
+            self._currentattempt = 0
+            self._lastrt = 1
+
+    def job_success(self, ):
+        with open( "/tmp/Renders/render_{:08d}.png".format(self._frame), 'rb' ) as f:
+            self._lastrender = f.read()
+        try:
+            os.remove( "/tmp/Renders/render_{:08d}.png".format(self._frame) );
+        except: 
+            print "\n\nfailed to remove temporary render result.\n\n"
+        self._currentattempt = 0
+        self.StopRender()
+        
+    def check_file_for_success(self,):
+        if osp.exists( "/tmp/Renders/render_{:08d}.png".format(self._frame) ) :
+            print "Found rendered image despite blender failure. Considering job successful."
+            self.job_success();
+        else:
+            self.job_failed();                    
+
+
     def CheckStatus(self, ):
         if self._process != None:
             self._process.poll()
@@ -145,24 +179,10 @@ class BlenderNode:
                 self._logthread = None
                 self._process = None
                 if self._lastrt == 0:
-                    with open( "/tmp/Renders/render_{:08d}.png".format(self._frame), 'rb' ) as f:
-                        self._lastrender = f.read()
-                    try:
-                        os.remove( "/tmp/Renders/render_{:08d}.png".format(self._frame) );
-                    except: 
-                        print "\n\nfailed to remove temporary render result.\n\n"
-                    self._currentattempt = 0
-                    self.StopRender()
+                    self.job_success();
                 else:
-                    print "Render job failed with code", str(self._lastrt), ",",
-                    if self._currentattempt < self._attempts:
-                        print "\n\nrestarting job for attempt", str(self._currentattempt + 1), "\n\n"
-                        self.RestartRender();
-                    else:
-                        print "\n\nterminating job due to excessive failures.\n\n"
-                        self._currentattempt = 0
-                        self.StopRender()
-                    
+                    print "Render job failed with code", str(self._lastrt), ",",                    
+                    self.check_file_for_success();
             else:
                 if self._timeout >= 0:
                     # Check the timeout
@@ -170,16 +190,7 @@ class BlenderNode:
                     time_running = (time_now - self._jobstart).total_seconds();
                     if time_running > self._timeout: # We have exceeded timeout
                         print "Render job timeout exceeded,",
-                        if self._currentattempt < self._attempts:
-                            print "\n\nrestarting job for attempt", str(self._currentattempt + 1), "\n\n"
-                            self.RestartRender();
-                        else:
-                            print "\n\nterminating job due to excessive failures.\n\n"
-                            self.StopRender()
-                            self._currentattempt = 0
-                            self._lastrt = 1
-                            
-
+                        self.check_file_for_success();                           
 
             
     def LastRender(self, ):
