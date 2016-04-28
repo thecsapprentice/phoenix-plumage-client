@@ -1,5 +1,6 @@
 import os.path as osp
 import os
+import logging
 
 import sys
 from subprocess import PIPE, Popen
@@ -45,6 +46,7 @@ class BlenderNode:
         self._timeoutlock = None
         self._currentattempt = 0
         self._jobstart = None
+        self._logger = logging.getLogger("blender")
 
     def NodeType(self, ):
         return "BLENDER"
@@ -140,14 +142,14 @@ class BlenderNode:
                 for cache_file in cache_files:
                     os.remove( cache_file );
             except:
-                print "\n\nfailed to clean up cache directory after stopping render.\n\n"
+                self._logger.warning(  "Failed to clean up cache directory after stopping render" );
 
     def job_failed(self, ):
         if self._currentattempt < self._attempts:
-            print "\n\nrestarting job for attempt", str(self._currentattempt + 1), "\n\n"
+            self._logger.info(  "Restarting job for attempt", str(self._currentattempt + 1) );
             self.RestartRender();
         else:
-            print "\n\nterminating job due to excessive failures.\n\n"
+            self._logger.info("Terminating job due to excessive failures." )
             self.StopRender()
             self._currentattempt = 0
             self._lastrt = 1
@@ -158,13 +160,14 @@ class BlenderNode:
         try:
             os.remove( "/tmp/Renders/render_{:08d}.png".format(self._frame) );
         except: 
-            print "\n\nfailed to remove temporary render result.\n\n"
+            self._logger.warning( "Failed to remove temporary render result." )
         self._currentattempt = 0
+        self._lastrt = 0
         self.StopRender()
         
     def check_file_for_success(self,):
         if osp.exists( "/tmp/Renders/render_{:08d}.png".format(self._frame) ) :
-            print "Found rendered image despite blender failure. Considering job successful."
+            self._logger.info(  "Found rendered image despite blender failure. Considering job successful." )
             self.job_success();
         else:
             self.job_failed();                    
@@ -181,7 +184,7 @@ class BlenderNode:
                 if self._lastrt == 0:
                     self.job_success();
                 else:
-                    print "Render job failed with code", str(self._lastrt), ",",                    
+                    self._logger.info(  "Render job failed with code {:d}".format(self._lastrt) )
                     self.check_file_for_success();
             else:
                 if self._timeout >= 0:
@@ -189,7 +192,7 @@ class BlenderNode:
                     time_now = datetime.now()
                     time_running = (time_now - self._jobstart).total_seconds();
                     if time_running > self._timeout: # We have exceeded timeout
-                        print "Render job timeout exceeded,",
+                        self._logger.info(  "Render job timeout exceeded," );
                         self.check_file_for_success();                           
 
             

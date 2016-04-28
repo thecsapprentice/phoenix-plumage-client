@@ -1,11 +1,12 @@
 #!/usr/bin/env python
 import logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 logging.getLogger('pika').setLevel(logging.INFO)
-LOG_FORMAT = ('%(levelname) -10s %(asctime)s %(name) -30s %(funcName) '
+LOG_FORMAT = ('%(levelname) -15s %(asctime)s %(name) -30s %(funcName) '
               '-35s %(lineno) -5d: %(message)s')
-LOGGER = logging.getLogger(__name__)
 
+LOGGER = logging.getLogger("Manager")
+NODE_LOGGER = logging.getLogger("Process")
 
 import pika
 import time
@@ -56,12 +57,12 @@ class RenderWorker(object):
         self._connection = None
         while self._connection == None:
             try:
-                print "Connecting to Broker..."
+                LOGGER.info( "Connecting to Broker..." )
                 parameters = pika.URLParameters(self._comm_host)
                 self._connection = pika.BlockingConnection(parameters)
             except Exception, e:
-                print e 
-                print(traceback.format_exc())
+                LOGGER.info(str(e))
+                LOGGER.info(traceback.format_exc())
                 time.sleep(5)
 
         self.channel = self._connection.channel()
@@ -75,7 +76,7 @@ class RenderWorker(object):
                                    exclusive=False,
                                    auto_delete=False)
                                    
-        print ' [*] Waiting for messages. To exit press CTRL+C'
+        LOGGER.info(' [*] Waiting for messages. To exit press CTRL+C')
 
         self.channel.basic_qos(prefetch_count=1)
         self.channel.basic_consume(self.callback,
@@ -108,11 +109,14 @@ class RenderWorker(object):
     def check_render(self, ):
         self.last_render_check = datetime.datetime.now()
         if self.render_started:
-            status = self._renderManager.status();            
-            print self._renderManager.last_log(),
+            status = self._renderManager.status();
+            log_text = self._renderManager.last_log()
+            for line in log_text.split("\n"):
+                if line:
+                    NODE_LOGGER.debug( line )
 
             if status == "SUCCESS":
-                print "Render complete."
+                LOGGER.info("Render complete.")
                 self.channel.basic_publish(exchange='', routing_key="log_queue",
                                            body = json.dumps( {"event":"render_finish",
                                                                "frame":self._renderManager._last_render_info["frame"],
@@ -129,18 +133,18 @@ class RenderWorker(object):
                 
                 # Save off the render to disk somewhere
                 url = self._murl+"/upload_render?uuid="+self._renderManager._last_render_info["uuid"]
-                print "Uploading completed render to %s" % url
+                LOGGER.info("Uploading completed render to %s" % url)
                 try:
                     requests.post( url, files={ 'render' : ("render.png", self._renderManager.last_render() ) })
                 except Exception, e:
-                    print "Failed to upload the final render: %s", str(e)
+                    LOGGER.warning("Failed to upload the final render: %s", str(e))
                     self.channel.basic_reject(delivery_tag=self._renderManager.tag, requeue=True);
                 else:
                     ##self._renderManager.save_last_render( self._save_location );
                     self.channel.basic_ack(delivery_tag = self._renderManager.tag)
                 self.render_started = False
             elif status == "FAILURE":
-                print "Render failed."
+                LOGGER.info("Render failed.")
                 self.channel.basic_publish(exchange='', routing_key="log_queue",
                                            body = json.dumps( {"event":"render_fail",
                                                                "frame":self._renderManager._last_render_info["frame"],
@@ -158,20 +162,16 @@ class RenderWorker(object):
                 self.channel.basic_ack(delivery_tag = self._renderManager.tag)
             else:
                 pass
-                #print status
 
     def callback(self, ch, method, properties, body):
         response_message = {}
         response_message["status"] = ""
 
-        print "Consuming: ", body
-
         body_config = dict()
         try:
             body_config = json.loads( body );
         except:
-            print "Failed to parse command: "
-            print body
+            LOGGER.error("Failed to parse command: %s", str(body))
             ch.basic_ack(delivery_tag = method.delivery_tag)
             return;       
 
@@ -179,21 +179,21 @@ class RenderWorker(object):
             self.check_render();
 
             if self._renderManager.status() != "RUNNING":
-                print "Caught a render job..."
+                LOGGER.info("Caught a render job...")
                 try:
                     frame = body_config["frame"]
                     scene_file = body_config["scene"]
                     rendertype = body_config["type"]
                     uuid = body_config["uuid"]
                 except:
-                    print "Render command was malformed. Discarding..."
+                    LOGGER.error("Render command was malformed. Discarding...")
                     ch.basic_ack(delivery_tag = method.delivery_tag)                
                 else:
                     if rendertype != "BLENDER":
                         ch.basic_reject(delivery_tag = method.delivery_tag, requeue=True);
                     else:
                         #ch.basic_ack(delivery_tag = method.delivery_tag)
-                        print "Rendering frame", str(frame), " for scene", scene_file
+                        LOGGER.info("Rendering frame %s for scene %s", str(frame), scene_file);
                         self._renderManager.render_single_frame( scene_file, frame, uuid );
                         self._renderManager.tag = method.delivery_tag
                         self.render_started = True
@@ -223,12 +223,12 @@ class RenderWorker(object):
             try:
                 self._connection.process_data_events();
             except pika.exceptions.ConnectionClosed, e:
-                print "Lost connection to management, killing any active processes"
+                LOGGER.warning("Lost connection to management, killing any active processes")
                 self.kill_pid()
-                print "Connection lost. Reconnecting..."
+                LOGGER.warning("Connection lost. Reconnecting...")
                 self.initiate_broker_communications()
             except KeyboardInterrupt:
-                print "Recieved kill command from terminal, shutting down."
+                LOGGER.info("Recieved kill command from terminal, shutting down.")
                 self.check_render()
                 self.kill_pid()
                 break;
@@ -242,6 +242,7 @@ class RenderWorker(object):
                 self.check_render()
                 sys.stdout.flush()
                 sys.stderr.flush()
+            time.sleep(.5);
 
 
 
