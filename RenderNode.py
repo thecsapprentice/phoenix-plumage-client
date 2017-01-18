@@ -20,6 +20,7 @@ import requests
 import argparse
 from node import RenderNode
 from node import BlenderNode
+from node import RenderManNode
 import os 
 import traceback
 import socket
@@ -41,11 +42,16 @@ class RenderWorker(object):
         # These are the communication members
         self._connection = None
         self.channel = None
-
+        self.active_queue = ""
+        self.active_queue_tag = None
+        self.queue_was_filled = False
+        
         # Replace these later
         bn = BlenderNode( blender_exec, blender_config, scene_path, kwargs["timeout"], kwargs["attempts"] )
+        rmn = RenderManNode( blender_exec, blender_config, scene_path, kwargs["timeout"], kwargs["attempts"] )
         self._renderManager = RenderNode();
         self._renderManager.register_renderer("BLENDER", bn );
+        self._renderManager.register_renderer("RENDERMAN", rmn );
         self._renderManager.set_active_engine( "BLENDER" )
 
         # periodic checks
@@ -67,10 +73,6 @@ class RenderWorker(object):
 
         self.channel = self._connection.channel()
 
-        self.channel.queue_declare(queue='render_queue',
-                                   durable=True,
-                                   exclusive=False,
-                                   auto_delete=False)
         self.channel.queue_declare(queue='log_queue',
                                    durable=True,
                                    exclusive=False,
@@ -79,8 +81,6 @@ class RenderWorker(object):
         LOGGER.info(' [*] Waiting for messages. To exit press CTRL+C')
 
         self.channel.basic_qos(prefetch_count=1)
-        self.channel.basic_consume(self.callback,
-                                   queue='render_queue')
         
 #    def QueryJobPriority(self,):
 #        
@@ -117,13 +117,14 @@ class RenderWorker(object):
 
             if status == "SUCCESS":
                 LOGGER.info("Render complete.")
+                render_info = self._renderManager.last_render_info()
                 self.channel.basic_publish(exchange='', routing_key="log_queue",
                                            body = json.dumps( {"event":"render_finish",
-                                                               "frame":self._renderManager._last_render_info["frame"],
-                                                               "scene":self._renderManager._last_render_info["scene"],
+                                                               "frame":render_info["frame"],
+                                                               "scene":render_info["scene"],
                                                                "time":datetime.datetime.now(),
-                                                               "uuid":self._renderManager._last_render_info["uuid"],
-                                                               "type":"BLENDER",
+                                                               "uuid":render_info["uuid"],
+                                                               "type":render_info["type"],
                                                                } , cls=DateTimeEncoder),
                                            properties=pika.BasicProperties(
                                                delivery_mode = 2,
@@ -132,7 +133,7 @@ class RenderWorker(object):
                                            )
                 
                 # Save off the render to disk somewhere
-                url = self._murl+"/upload_render?uuid="+self._renderManager._last_render_info["uuid"]
+                url = self._murl+"/upload_render?uuid="+render_info["uuid"]
                 LOGGER.info("Uploading completed render to %s" % url)
                 try:
                     requests.post( url, files={ 'render' : ("render.png", self._renderManager.last_render() ) })
@@ -145,13 +146,14 @@ class RenderWorker(object):
                 self.render_started = False
             elif status == "FAILURE":
                 LOGGER.info("Render failed.")
+                render_info = self._renderManager.last_render_info()
                 self.channel.basic_publish(exchange='', routing_key="log_queue",
                                            body = json.dumps( {"event":"render_fail",
-                                                               "frame":self._renderManager._last_render_info["frame"],
-                                                               "scene":self._renderManager._last_render_info["scene"],
+                                                               "frame":render_info["frame"],
+                                                               "scene":render_info["scene"],
                                                                "time":datetime.datetime.now(),
-                                                               "uuid":self._renderManager._last_render_info["uuid"],
-                                                               "type":"BLENDER",
+                                                               "uuid":render_info["uuid"],
+                                                               "type":render_info["type"],
                                                                } , cls=DateTimeEncoder),
                                            properties=pika.BasicProperties(
                                                delivery_mode = 2,
@@ -162,7 +164,34 @@ class RenderWorker(object):
                 self.channel.basic_ack(delivery_tag = self._renderManager.tag)
             else:
                 pass
+            
+    def pull_and_update_queue(self,):       
+        url = self._murl+"/available_jobs"
+        print url
+        try:
+            res = requests.get( url )
+        except Exception, e:
+            LOGGER.warning("Failed to retreieve job priority list from manager: %s", str(e))               
+        else:
+            if len(res.json()) == 0 and self.active_queue != "":
+                LOGGER.info("No jobs available. Disconnecting from the last queue.")
+                self.channel.basic_cancel( None, self.active_queue_tag )
+                self.active_queue = ""
+                
+            for job in res.json():
+                if self._renderManager.can_handle_render( job[1] ):
+                    if self.active_queue != job[0]:
+                        LOGGER.info( "New job has priority. Switching to queue: render_%s" % job[0] )
+                        self.channel.basic_cancel( None, self.active_queue_tag )
+                        self.active_queue = job[0]
+                        self.active_queue_tag = self.channel.basic_consume(self.callback, queue='render_%s' % self.active_queue )
+                    break;
+                else:
+                    print "Can't handle render jobs of type '%s', skipping to next job in queue..." % job[1]
 
+                
+        
+            
     def callback(self, ch, method, properties, body):
         response_message = {}
         response_message["status"] = ""
@@ -189,12 +218,12 @@ class RenderWorker(object):
                     LOGGER.error("Render command was malformed. Discarding...")
                     ch.basic_ack(delivery_tag = method.delivery_tag)                
                 else:
-                    if rendertype != "BLENDER":
+                    if not self._renderManager.can_handle_render(rendertype):
                         ch.basic_reject(delivery_tag = method.delivery_tag, requeue=True);
                     else:
                         #ch.basic_ack(delivery_tag = method.delivery_tag)
-                        LOGGER.info("Rendering frame %s for scene %s", str(frame), scene_file);
-                        self._renderManager.render_single_frame( scene_file, frame, uuid );
+                        LOGGER.info("Rendering frame %s for scene %s of type %s", str(frame), scene_file, rendertype);
+                        self._renderManager.render_single_frame_of_type( scene_file, frame, uuid, rendertype );
                         self._renderManager.tag = method.delivery_tag
                         self.render_started = True
                         self.channel.basic_publish(exchange='', routing_key="log_queue",
@@ -203,7 +232,7 @@ class RenderWorker(object):
                                                                        "scene":scene_file,
                                                                        "time":datetime.datetime.now(),
                                                                        "uuid":uuid,
-                                                                       "type":"BLENDER",
+                                                                       "type":rendertype,
                                                                        } , cls=DateTimeEncoder),
                                                    properties=pika.BasicProperties(
                                                        delivery_mode = 2,
@@ -238,10 +267,15 @@ class RenderWorker(object):
             #if (datetime.now() - self.last_update).seconds >= 120:
             #    self.send_status_update();
 
+            
             if (datetime.datetime.now() - self.last_render_check).seconds >= 5:
                 self.check_render()
                 sys.stdout.flush()
                 sys.stderr.flush()
+                if not self.render_started:
+                    self.pull_and_update_queue()
+
+                
             time.sleep(.5);
 
 
@@ -255,7 +289,7 @@ def valid_path(path):
     
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Plumage Render Node")
+    parser = argparse.ArgumentParser(description="Plumage Render Node",fromfile_prefix_chars='@')
     parser.add_argument('-a','--ampq_server', default='localhost:5672', type=str )
     parser.add_argument('-U','--ampq_user', default='guest', type=str )
     parser.add_argument('-P','--ampq_password', default='guest', type=str )

@@ -1,0 +1,14 @@
+-s
+/data/scenes
+-U
+BlenderClient
+-P
+client
+-a
+plumage-rabbit:5672/BlenderRenderCC
+-m
+http://plumageManager:8888
+-t
+501600
+--attempts
+2
