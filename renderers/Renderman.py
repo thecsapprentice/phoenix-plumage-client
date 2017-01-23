@@ -27,12 +27,13 @@ def enqueue_output(out, queue):
 class RenderManNode:
     """A container for a single renderman rendering process."""
 
-    def __init__(self, renderman_exec, config_path, scene_path, timeout=-1, attempts=1):       
-        self._exec_binary = renderman_exec
-        self._config_path = config_path
-        self._scene_path = scene_path
-        self._timeout = timeout
-        self._attempts = attempts
+    def __init__(self, **kwargs):
+        self._exec_binary = kwargs['exec']
+        self._config_path = kwargs['config_path']
+        self._scene_path = kwargs['scene_path']
+        self._timeout = kwargs['timeout']
+        self._attempts = int(kwargs['attempts'])
+        self._rmantree = kwargs['rmantree']
         self._scene = None
         self._frame = None
         self._process = None
@@ -40,8 +41,9 @@ class RenderManNode:
         self._logthread = None
         self._lastrt = -1
         self._current_log = ""
-        self._lastrender = bytes([])
-
+        self._lastrender = {}
+        self._lastrender_files = []
+        
         self._timeoutthread = None
         self._timeoutlock = None
         self._currentattempt = 0
@@ -87,22 +89,61 @@ class RenderManNode:
         else:
             return ""
                 
+
+    def SanitizeRIB( self, rib_file ):        
+        rib_data = []
+        renders = []
+        extra_display = False;
+        for line in rib_file:
+            line = line.strip()
+            if line.startswith( "Display " ):
+                parts = line.strip().split()
+                image_filename = osp.basename( parts[1].strip('"') )
+                renders.append( image_filename )
+                if extra_display:
+                    parts[1] = '"+{:s}"'.format( osp.join( "/tmp", image_filename ) )
+                else:
+                    parts[1] = '"{:s}"'.format( osp.join( "/tmp", image_filename ) )
+                    extra_display = True
+                new_line = " ".join( parts )
+                rib_data.append( new_line )
+            else:
+                rib_data.append( line )
+        return ["\n".join( rib_data ), renders]
                 
     def BeginRender(self, ):
         self.StopRender();        
         self._current_log = ""      
 
+        rib_data = ""
+        renders = []
+        try:
+            rib_file = open( osp.join( self._scene_path, self._scene, 'Scene.{:04d}.rib'.format(self._frame)), 'r' )
+            rib_data, renders = self.SanitizeRIB( rib_file )
+        except:
+            pass
+        
+        self._lastrender_files = renders
+        read, write = os.pipe()
+        os.write(write, rib_data)
+        os.close(write)
+
         # Remove the image file that we will be producing to eliminate false positives
-        #self._process = Popen( [self._exec_binary,
-        #                        osp.join( self._scene_path, self._scene, 'scene.rib' ),
-        #                    ],
-        #                       stdout=PIPE, 
-        #                       stderr=PIPE,
-        #                       env = dict( os.environ,
-        #                                   RENDERMAN_USER_CONFIG=self._config_path,
-        #                                   TMP = "/tmp" ),
-        #                   );
-        self._process = Popen( ["/bin/true"], stdout=PIPE, stderr=PIPE )
+        self._process = Popen( [self._exec_binary,
+                                "-cwd", osp.join( self._scene_path, self._scene),
+                                "-Progress",
+                                "-loglevel", "4",
+                                "-"    
+        ],
+                               stdin=read,
+                               stdout=PIPE, 
+                               stderr=PIPE,
+                               env = dict( os.environ,
+                                           RENDERMAN_USER_CONFIG=self._config_path,
+                                           RMANTREE=self._rmantree,
+                                           TMP = "/tmp" ),
+                           );
+        #self._process = Popen( ["/bin/true"], stdout=PIPE, stderr=PIPE )
         
         self._logqueue = Queue()
         self._logthread = Thread( target=enqueue_output, args=(self._process.stdout, self._logqueue ) )
@@ -126,7 +167,7 @@ class RenderManNode:
 
     def job_failed(self, ):
         if self._currentattempt < self._attempts:
-            self._logger.info(  "Restarting job for attempt", str(self._currentattempt + 1) );
+            self._logger.info(  "Restarting job for attempt {:d}".format(self._currentattempt + 1) );
             self.RestartRender();
         else:
             self._logger.info("Terminating job due to excessive failures." )
@@ -135,16 +176,41 @@ class RenderManNode:
             self._lastrt = 1
 
     def job_success(self, ):
+        self._lastrender = {}
+        for filename in self._lastrender_files:
+            parts = filename.split('.')
+            clean_parts = []
+            for p in parts:
+                if p == "Scene":
+                    continue;
+                try:
+                    test = int(p)
+                except:
+                    pass
+                else:
+                    continue
+                if p == "exr":
+                    continue
+                clean_parts.append( p )
+            
+            label = 'render'            
+            if  len(clean_parts) > 0 :
+                label = ".".join(clean_parts)
+                
+            with open( "/tmp/{:s}".format(filename), 'rb' ) as f:
+                self._lastrender[label] = f.read()
+                
+            try:
+                os.remove( "/tmp/{:s}".format(filename) );
+            except: 
+                self._logger.warning( "Failed to remove temporary render result." )               
+        
         self._currentattempt = 0
         self._lastrt = 0
         self.StopRender()
         
     def check_file_for_success(self,):
-        if osp.exists( "/tmp/Renders/render_{:08d}.png".format(self._frame) ) :
-            self._logger.info(  "Found rendered image despite renderman failure. Considering job successful." )
-            self.job_success();
-        else:
-            self.job_failed();                    
+        self.job_failed();                    
 
 
     def CheckStatus(self, ):
@@ -174,6 +240,11 @@ class RenderManNode:
         return self._lastrender
 
 
+def BuildRenderer(kwargs):
+    return RenderManNode(**kwargs)
+
+
+    
 def __selftest__():
     bn = RendermanNode("renderman","/tmp/")
     bn.SetScene( "/tmp/test.blend" )

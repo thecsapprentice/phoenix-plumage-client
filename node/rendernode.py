@@ -7,14 +7,15 @@ class RenderNode:
     _current_engine = ""
     _render_engines = dict()
     _last_render_info = dict()
-
+    _active_engine = ""
 
     def __init__(self):
         pass
 
     def register_renderer(self, key, engine):
         self._render_engines[key] = engine
-
+        self._active_engine = key
+        
     def set_active_engine(self, key ):
         self._active_engine = key
 
@@ -46,6 +47,9 @@ class RenderNode:
         log = self._render_engines[self._active_engine].Log();
         return log
 
+    def extension(self, ):
+        return self._render_engines[self._active_engine].Extension();
+    
     def last_render(self, ):
         return self._render_engines[self._active_engine].LastRender()
                                                                           

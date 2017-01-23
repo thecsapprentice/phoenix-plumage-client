@@ -40,7 +40,7 @@ class BlenderNode:
         self._logthread = None
         self._lastrt = -1
         self._current_log = ""
-        self._lastrender = bytes([])
+        self._lastrender = {"render": bytes([])}
 
         self._timeoutthread = None
         self._timeoutlock = None
@@ -156,7 +156,7 @@ class BlenderNode:
 
     def job_success(self, ):
         with open( "/tmp/Renders/render_{:08d}.png".format(self._frame), 'rb' ) as f:
-            self._lastrender = f.read()
+            self._lastrender["render"] = f.read()
         try:
             os.remove( "/tmp/Renders/render_{:08d}.png".format(self._frame) );
         except: 

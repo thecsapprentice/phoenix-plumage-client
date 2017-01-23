@@ -16,14 +16,17 @@ import json
 import uuid
 import socket
 import sys
+from requests_toolbelt import MultipartEncoder
 import requests
 import argparse
 from node import RenderNode
-from node import BlenderNode
-from node import RenderManNode
 import os 
 import traceback
 import socket
+import ConfigParser
+import importlib
+import io
+import struct
 
 class DateTimeEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -35,9 +38,9 @@ class DateTimeEncoder(json.JSONEncoder):
 
 class RenderWorker(object):
     
-    def __init__(self, comm_host, blender_exec, blender_config, save_loc, manager_url, scene_path, **kwargs):
+    def __init__(self, comm_host, config ):
         self._comm_host = comm_host
-        self._murl = manager_url
+        self._murl = config.get( 'settings', 'manager_url' );
 
         # These are the communication members
         self._connection = None
@@ -46,18 +49,22 @@ class RenderWorker(object):
         self.active_queue_tag = None
         self.queue_was_filled = False
         
-        # Replace these later
-        bn = BlenderNode( blender_exec, blender_config, scene_path, kwargs["timeout"], kwargs["attempts"] )
-        rmn = RenderManNode( blender_exec, blender_config, scene_path, kwargs["timeout"], kwargs["attempts"] )
+        # Load Renderer Modules
         self._renderManager = RenderNode();
-        self._renderManager.register_renderer("BLENDER", bn );
-        self._renderManager.register_renderer("RENDERMAN", rmn );
-        self._renderManager.set_active_engine( "BLENDER" )
+        for module in config.options('modules'):
+            status = config.getboolean( 'modules', module )
+            if status:
+                print "Loading render module", module, "..."
+                mod = importlib.import_module(config.get(module,'module'))
+                renderer_args = dict( config.items(module))
+                renderer_args["scene_path"] = config.get('settings', 'scene_path' );
+                renderer = mod.BuildRenderer( renderer_args )
+                self._renderManager.register_renderer(renderer.NodeType(), renderer )
 
         # periodic checks
         self.last_render_check = datetime.datetime.now()
         self.render_started = False
-        self._save_location = save_loc
+        self._save_location = config.get( 'settings', 'save_cache_path' );
 
     def initiate_broker_communications(self, ):
         self._connection = None
@@ -81,16 +88,6 @@ class RenderWorker(object):
         LOGGER.info(' [*] Waiting for messages. To exit press CTRL+C')
 
         self.channel.basic_qos(prefetch_count=1)
-        
-#    def QueryJobPriority(self,):
-#        
-#        try:
-#            r = requests.get(self._murl+"/job_priority")
-#        except: Exception, e:
-#            print "Failed to get a job priority list from the server. Trying later."
-#        if r.status_code != requests.codes.ok:
-#            print "Failed to get a job priority list from the server. Trying later."
-            
 
 
     def spin_up_new_pid(self,config):
@@ -135,14 +132,25 @@ class RenderWorker(object):
                 # Save off the render to disk somewhere
                 url = self._murl+"/upload_render?uuid="+render_info["uuid"]
                 LOGGER.info("Uploading completed render to %s" % url)
-                try:
-                    requests.post( url, files={ 'render' : ("render.png", self._renderManager.last_render() ) })
-                except Exception, e:
-                    LOGGER.warning("Failed to upload the final render: %s", str(e))
-                    self.channel.basic_reject(delivery_tag=self._renderManager.tag, requeue=True);
-                else:
-                    ##self._renderManager.save_last_render( self._save_location );
+                last_render = self._renderManager.last_render()
+
+                all_files_sent = True
+                for label in last_render.keys():
+                    file_list = {}
+                    file_list[label] = ( label+"."+self._renderManager.extension(), last_render[label] )
+                    print "Sending image {:s}".format( label+"."+self._renderManager.extension() ) 
+                    try:
+                        requests.post( url, files=file_list)
+                    except Exception, e:
+                        LOGGER.warning("Failed to upload the render %s: %s" % (label, str(e)) )
+                        all_files_sent = False
+
+                if all_files_sent:
                     self.channel.basic_ack(delivery_tag = self._renderManager.tag)
+                else:
+                    self.channel.basic_reject(delivery_tag=self._renderManager.tag, requeue=True);
+
+                        
                 self.render_started = False
             elif status == "FAILURE":
                 LOGGER.info("Render failed.")
@@ -175,14 +183,16 @@ class RenderWorker(object):
         else:
             if len(res.json()) == 0 and self.active_queue != "":
                 LOGGER.info("No jobs available. Disconnecting from the last queue.")
-                self.channel.basic_cancel( None, self.active_queue_tag )
+                if self.active_queue_tag != None:
+                    self.channel.basic_cancel( None, self.active_queue_tag )
                 self.active_queue = ""
                 
             for job in res.json():
                 if self._renderManager.can_handle_render( job[1] ):
                     if self.active_queue != job[0]:
                         LOGGER.info( "New job has priority. Switching to queue: render_%s" % job[0] )
-                        self.channel.basic_cancel( None, self.active_queue_tag )
+                        if self.active_queue_tag != None:
+                            self.channel.basic_cancel( None, self.active_queue_tag )
                         self.active_queue = job[0]
                         self.active_queue_tag = self.channel.basic_consume(self.callback, queue='render_%s' % self.active_queue )
                     break;
@@ -287,24 +297,55 @@ def valid_path(path):
         msg = '"%s" is not a valid path name.' % path 
         raise argparse.ArgumentTypeError(msg)
     
+def valid_file(path):
+    if os.path.isfile( path ):
+        return path
+    else:
+        msg = '"%s" is not a valid file name.' % path 
+        raise argparse.ArgumentTypeError(msg)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Plumage Render Node",fromfile_prefix_chars='@')
-    parser.add_argument('-a','--ampq_server', default='localhost:5672', type=str )
-    parser.add_argument('-U','--ampq_user', default='guest', type=str )
-    parser.add_argument('-P','--ampq_password', default='guest', type=str )
-    parser.add_argument('-e','--blender_exec', default='blender', type=str )
-    parser.add_argument('-C','--blender_cache', default='/tmp', type=valid_path)
-    parser.add_argument('-S','--save_cache_path', default='/tmp', type=valid_path)
-    parser.add_argument('-m','--manager_url', default='localhost', type=str)
-    parser.add_argument('-s','--scene_path', default='/var/plumage/scenes', type=valid_path )
-    parser.add_argument('-t','--timeout', default=3600, help="Number of seconds to wait before retrying a frame.",  type=int )
-    parser.add_argument('--attempts', default=3, help="Number of attempts before giving up on a frame.", type=int)
+    parser = argparse.ArgumentParser(description="Plumage Render Node")
 
-    args = parser.parse_args()
+    parser.add_argument("-c", "--conf_file", type=valid_file,
+                        help="Specify config file", metavar="FILE")
+    
+    args, remaining_argv = parser.parse_known_args()
+    defaults = {
+        "ampq_server" : "http://localhost:5672",
+        "ampq_user" : "guest",
+        "ampq_password": "guest",
+        "save_cache_path":"/tmp",
+        "manager_url":"http://localhost:8888",
+        "scene_path":"/tmp",
+    }
+    
+    config = ConfigParser.SafeConfigParser()
+    if args.conf_file:
+        config.read([args.conf_file])
+        defaults = dict(config.items("settings"))
+        
+    parser.set_defaults(**defaults)    
+    parser.add_argument('-a','--ampq_server', type=str )
+    parser.add_argument('-U','--ampq_user', type=str )
+    parser.add_argument('-P','--ampq_password', type=str )
+    parser.add_argument('-S','--save_cache_path', type=valid_path)
+    parser.add_argument('-m','--manager_url', type=str)
+    parser.add_argument('-s','--scene_path', type=valid_path )
 
-    ampq_url = 'http://%s:%s@%s'%(args.ampq_user,args.ampq_password,args.ampq_server)
+    args = parser.parse_args(remaining_argv)
+   
+    if not config.has_section('settings'):
+        config.add_section('settings');
+    print vars(args)
+    for item, value in vars(args).items():
+        config.set( 'settings', item, str(value) );
+    
+    ampq_url = 'http://%s:%s@%s'%(config.get('settings','ampq_user'),
+                                  config.get('settings','ampq_password'),
+                                  config.get('settings','ampq_server') );
+    
     print "AMPQ:", ampq_url
     
-    worker = RenderWorker( ampq_url, args.blender_exec, args.blender_cache,  args.save_cache_path, args.manager_url, args.scene_path, timeout=args.timeout, attempts=args.attempts );
+    worker = RenderWorker( ampq_url, config )
     worker.run();
