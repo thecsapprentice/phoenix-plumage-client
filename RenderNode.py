@@ -175,7 +175,6 @@ class RenderWorker(object):
             
     def pull_and_update_queue(self,):       
         url = self._murl+"/available_jobs"
-        print url
         try:
             res = requests.get( url )
         except Exception, e:
@@ -183,8 +182,8 @@ class RenderWorker(object):
         else:
             if len(res.json()) == 0 and self.active_queue != "":
                 LOGGER.info("No jobs available. Disconnecting from the last queue.")
-                if self.active_queue_tag != None:
-                    self.channel.basic_cancel( None, self.active_queue_tag )
+                if self.active_queue_tag != None:			
+                    self.channel.basic_cancel( consumer_tag=self.active_queue_tag )
                 self.active_queue = ""
                 
             for job in res.json():
@@ -192,7 +191,7 @@ class RenderWorker(object):
                     if self.active_queue != job[0]:
                         LOGGER.info( "New job has priority. Switching to queue: render_%s" % job[0] )
                         if self.active_queue_tag != None:
-                            self.channel.basic_cancel( None, self.active_queue_tag )
+                            self.channel.basic_cancel( consumer_tag=self.active_queue_tag )
                         self.active_queue = job[0]
                         self.active_queue_tag = self.channel.basic_consume(self.callback, queue='render_%s' % self.active_queue )
                     break;

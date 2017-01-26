@@ -27,12 +27,12 @@ def enqueue_output(out, queue):
 class BlenderNode:
     """A container for a single blender rendering process."""
 
-    def __init__(self, blender_exec, config_path, scene_path, timeout=-1, attempts=1):       
-        self._exec_binary = blender_exec
-        self._config_path = config_path
-        self._scene_path = scene_path
-        self._timeout = timeout
-        self._attempts = attempts
+    def __init__(self, **kwargs ):
+        self._exec_binary = kwargs['exec']
+        self._config_path = kwargs['config_path']
+        self._scene_path = kwargs['scene_path']
+        self._timeout = kwargs['timeout']
+        self._attempts = int(kwargs['attempts'])
         self._scene = None
         self._frame = None
         self._process = None
@@ -198,6 +198,9 @@ class BlenderNode:
             
     def LastRender(self, ):
         return self._lastrender
+
+def BuildRenderer(kwargs):
+    return BlenderNode(**kwargs)
 
 
 def __selftest__():
